@@ -518,6 +518,99 @@ func TestIssue70179(t *testing.T) {
 	}
 }
 
+func TestParseDuplicateAttributes(t *testing.T) {
+	// Browsers keep only the first occurrence of an attribute name (compared
+	// ASCII case-insensitively) and drop the rest. If the parsed tree kept the
+	// later duplicates, a sanitizer inspecting it could validate a different
+	// value than the one a browser applies to the rendered HTML (CVE-2026-27136).
+	for _, tc := range []struct {
+		name     string
+		input    string
+		fragment bool
+		tag      string
+		want     string
+	}{
+		{
+			name:  "same case",
+			input: `<a href="javascript:alert(1)" href="https://example.com/">x</a>`,
+			tag:   "a",
+			want:  `<a href="javascript:alert(1)">x</a>`,
+		},
+		{
+			name:  "different case",
+			input: `<a HREF="javascript:alert(1)" href="https://example.com/">x</a>`,
+			tag:   "a",
+			want:  `<a href="javascript:alert(1)">x</a>`,
+		},
+		{
+			name:  "multiple duplicates",
+			input: `<img src="x" onerror="alert(1)" OnError="" onerror="" ONERROR="">`,
+			tag:   "img",
+			want:  `<img src="x" onerror="alert(1)"/>`,
+		},
+		{
+			name:     "fragment",
+			input:    `<a href="javascript:alert(1)" Href="https://example.com/">x</a>`,
+			fragment: true,
+			tag:      "a",
+			want:     `<a href="javascript:alert(1)">x</a>`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var roots []*Node
+			if tc.fragment {
+				context := &Node{Type: ElementNode, Data: "body", DataAtom: atom.Body}
+				nodes, err := ParseFragment(strings.NewReader(tc.input), context)
+				if err != nil {
+					t.Fatalf("ParseFragment: %v", err)
+				}
+				roots = nodes
+			} else {
+				doc, err := Parse(strings.NewReader(tc.input))
+				if err != nil {
+					t.Fatalf("Parse: %v", err)
+				}
+				roots = []*Node{doc}
+			}
+			var find func(*Node) *Node
+			find = func(n *Node) *Node {
+				if n.Type == ElementNode && n.Data == tc.tag {
+					return n
+				}
+				for c := n.FirstChild; c != nil; c = c.NextSibling {
+					if m := find(c); m != nil {
+						return m
+					}
+				}
+				return nil
+			}
+			var found *Node
+			for _, root := range roots {
+				if found = find(root); found != nil {
+					break
+				}
+			}
+			if found == nil {
+				t.Fatalf("no <%s> element in parsed tree", tc.tag)
+			}
+			seen := make(map[string]bool)
+			for _, a := range found.Attr {
+				if seen[a.Key] {
+					t.Errorf("duplicate attribute %q in parsed tree: %v", a.Key, found.Attr)
+				}
+				seen[a.Key] = true
+			}
+			var b strings.Builder
+			if err := Render(&b, found); err != nil {
+				t.Fatalf("Render: %v", err)
+			}
+			if got := b.String(); got != tc.want {
+				t.Errorf("Render: got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestDepthLimit(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
